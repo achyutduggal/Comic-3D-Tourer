@@ -17,16 +17,6 @@ Comic-3D-Tourer is a 3D touring tool that enables commercial shops, heritage sit
 2. **Heritage Sites**: Museums, historical landmarks, cultural institutions requiring preservation and showcase capabilities
 3. **Real Estate Companies**: Property managers, brokers, and developers needing efficient property showcasing
 
-## Unique Selling Propositions (USP)
-
-- **Video → Virtual Tour Pipeline**: Upload video only; everything automated end-to-end
-- **No 3D Artists Required**: Zero manual modeling, texturing, or scene setup
-- **Photoreal Digital Twin Quality**: Captures signage, textures, and real-world artifacts with high fidelity
-- **Faster Turnaround + Lower Cost**: Significantly reduced time-to-live compared to traditional workflows
-- **Website-Ready Output**: Shareable link + iframe/SDK embed for seamless integration
-- **Optimized for Real-Time Viewing**: Smooth performance on both mobile and desktop devices
-- **Easy Updates**: Re-capture new video to refresh tours without starting from scratch
-
 ### Audience Benefits
 - **Shops**: Better customer engagement + remote browsing capabilities
 - **Heritage**: Digital preservation + high-fidelity showcase for global audiences
