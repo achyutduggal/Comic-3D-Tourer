@@ -1,1363 +1,1191 @@
-# Design Document: 3D Virtual Tour Application
+# Design Document: Comic-3D-Tourer
 
-## Overview
+## High-Level Architecture
 
-The 3D Virtual Tour Application is a web-based platform that enables retail shops, showrooms, and real estate properties to create immersive virtual experiences using Gaussian Splatting technology. The system's core innovation is an intelligent auto-navigation engine that automatically analyzes 3D point cloud data to identify optimal viewing positions and generate natural tour paths.
+Comic-3D-Tourer is built on AWS cloud infrastructure with a microservices architecture. The system consists of:
 
-The application consists of three main subsystems:
-1. **Rendering Engine**: Handles Gaussian Splatting visualization and real-time 3D rendering
-2. **Auto-Navigation System**: Analyzes spatial data and generates intelligent navigation paths
-3. **Content Management Platform**: Manages tour creation, configuration, and analytics
+1. **Frontend Layer**: Next.js/React dashboard and Three.js-based viewer
+2. **API Layer**: FastAPI (Python) for ML operations, Golang for core infrastructure
+3. **Processing Layer**: GPU-accelerated workers orchestrated by Step Functions
+4. **Storage Layer**: S3 for objects, RDS for relational data, ElastiCache for caching
+5. **Delivery Layer**: CloudFront CDN for global tour distribution
+6. **Security Layer**: Cognito, IAM, KMS, WAF for comprehensive protection
+7. **Observability Layer**: CloudWatch, X-Ray, QuickSight for monitoring and analytics
 
-The system is designed as a client-heavy web application with a lightweight backend for storage and processing. The rendering engine runs entirely in the browser using WebGL 2.0, while the auto-navigation algorithms execute server-side during tour creation.
+### Component Responsibilities
 
-## Architecture
+**Frontend (Next.js/React)**
+- User authentication and session management
+- Project and tour management UI
+- Video upload with progress tracking
+- Analytics dashboard
+- Admin operations interface
 
-### System Architecture
+**Viewer (Three.js/WebGL)**
+- Real-time tour rendering
+- Progressive loading and streaming
+- Device-adaptive quality
+- Navigation controls
+- Embed SDK for third-party integration
 
+**FastAPI (Python)**
+- ML pipeline orchestration
+- Frame sampling and quality assessment
+- Integration with GS/NeRF libraries
+- Job status management
+- Webhook handling
+
+**Golang API**
+- High-throughput request handling
+- Tour metadata serving
+- Authentication and authorization
+- Rate limiting
+- Signed URL generation
+
+**AWS Lambda**
+- Thumbnail generation
+- Webhook dispatching
+- Lightweight data transformations
+- S3 event processing
+
+**Step Functions**
+- Pipeline orchestration (preprocess → train → optimize → publish)
+- Error handling and retries
+- State management
+- Parallel execution coordination
+
+**EKS/ECS Workers**
+- CPU workers: frame extraction, validation, packaging
+- GPU workers: pose estimation, GS/NeRF training, optimization
+
+**AWS Batch**
+- GPU job scheduling
+- Resource allocation
+- Queue management
+- Spot instance integration
+
+## Detailed Pipeline Design
+
+### Stage 1: Upload and Ingest
+
+**Flow:**
+1. User uploads video via Next.js frontend
+2. Frontend requests presigned S3 URL from Golang API
+3. Video uploaded directly to S3 (bypassing backend)
+4. S3 event triggers Lambda to validate video
+5. Lambda creates job record in RDS and enqueues to Step Functions
+
+**S3 Key Structure:**
 ```
-┌─────────────────────────────────────────────────────────────┐
-│                        Client Layer                          │
-├─────────────────────────────────────────────────────────────┤
-│  ┌──────────────┐  ┌──────────────┐  ┌──────────────┐      │
-│  │   Viewer UI  │  │  Creator UI  │  │  Analytics   │      │
-│  │  Component   │  │  Component   │  │  Dashboard   │      │
-│  └──────┬───────┘  └──────┬───────┘  └──────┬───────┘      │
-│         │                  │                  │              │
-│  ┌──────┴──────────────────┴──────────────────┴───────┐    │
-│  │         Application State Manager                   │    │
-│  └──────┬──────────────────┬──────────────────┬───────┘    │
-│         │                  │                  │              │
-│  ┌──────┴───────┐  ┌──────┴───────┐  ┌──────┴───────┐     │
-│  │   Gaussian   │  │  Navigation  │  │   Hotspot    │     │
-│  │    Splat     │  │   Controller │  │   Manager    │     │
-│  │   Renderer   │  │              │  │              │     │
-│  └──────────────┘  └──────────────┘  └──────────────┘     │
-└─────────────────────────────────────────────────────────────┘
-                            │
-                    ┌───────┴────────┐
-                    │   REST API     │
-                    └───────┬────────┘
-┌─────────────────────────────────────────────────────────────┐
-│                       Server Layer                           │
-├─────────────────────────────────────────────────────────────┤
-│  ┌──────────────┐  ┌──────────────┐  ┌──────────────┐      │
-│  │   Upload     │  │Auto-Navigation│  │  Analytics   │      │
-│  │  Processor   │  │    Engine     │  │   Service    │      │
-│  └──────┬───────┘  └──────┬───────┘  └──────┬───────┘      │
-│         │                  │                  │              │
-│  ┌──────┴──────────────────┴──────────────────┴───────┐    │
-│  │              Storage Layer                          │    │
-│  │  ┌──────────┐  ┌──────────┐  ┌──────────┐         │    │
-│  │  │Point Cloud│  │Tour Config│  │Analytics │         │    │
-│  │  │  Storage  │  │  Database │  │   Data   │         │    │
-│  │  └──────────┘  └──────────┘  └──────────┘         │    │
-│  └─────────────────────────────────────────────────────┘    │
-└─────────────────────────────────────────────────────────────┘
-```
-
-### Technology Stack
-
-**Client-Side:**
-- WebGL 2.0 for 3D rendering
-- Three.js as the 3D framework foundation
-- Custom Gaussian Splatting shader implementation
-- React or Vue.js for UI components
-- IndexedDB for client-side caching
-
-**Server-Side:**
-- Node.js with Express or Python with FastAPI
-- PostgreSQL for tour configuration and metadata
-- S3-compatible object storage for .ply files
-- Redis for caching processed navigation data
-
-**Processing:**
-- Open3D or PCL (Point Cloud Library) for spatial analysis
-- NumPy/SciPy for geometric computations
-- Graph algorithms for pathfinding (Dijkstra's, A*)
-
-## Components and Interfaces
-
-### 1. Gaussian Splat Renderer
-
-The renderer is responsible for loading, processing, and displaying Gaussian Splatting data in real-time.
-
-**Core Classes:**
-
-```typescript
-class GaussianSplatRenderer {
-  private scene: THREE.Scene
-  private camera: THREE.PerspectiveCamera
-  private renderer: THREE.WebGLRenderer
-  private splatMaterial: THREE.ShaderMaterial
-  private pointCloud: GaussianSplatData
-  
-  constructor(canvas: HTMLCanvasElement, config: RendererConfig)
-  
-  // Load and parse .ply file
-  async loadPointCloud(url: string): Promise<void>
-  
-  // Render current frame
-  render(): void
-  
-  // Update camera position and orientation
-  updateCamera(position: Vector3, target: Vector3): void
-  
-  // Set level of detail based on performance
-  setLOD(level: number): void
-  
-  // Clean up resources
-  dispose(): void
-}
-
-interface GaussianSplatData {
-  positions: Float32Array      // xyz coordinates
-  colors: Uint8Array          // rgb values
-  opacities: Float32Array     // alpha values
-  scales: Float32Array        // splat sizes
-  rotations: Float32Array     // quaternion rotations
-  count: number               // total splat count
-}
-
-interface RendererConfig {
-  targetFPS: number
-  maxMemoryMB: number
-  enableLOD: boolean
-  antialias: boolean
-}
+projects/{project_id}/raw/{job_id}/video.mp4
 ```
 
-**Shader Implementation:**
+**Validation Checks:**
+- File format (MP4, MOV, AVI)
+- Resolution ≥1080p
+- Frame rate ≥24fps
+- Duration 1-30 minutes
+- File size ≤10GB
 
-The Gaussian Splatting shader renders each point as a 3D Gaussian distribution:
+### Stage 2: Frame Sampling
 
-```glsl
-// Vertex Shader (pseudo-code)
-attribute vec3 position;
-attribute vec3 color;
-attribute float opacity;
-attribute vec3 scale;
-attribute vec4 rotation;
+**Flow:**
+1. Step Functions invokes CPU worker (ECS task)
+2. Worker downloads video from S3
+3. Extract frames at 2fps initially
+4. Apply quality filters:
+   - Blur detection (Laplacian variance)
+   - Brightness/contrast analysis
+   - Motion blur detection
+   - Redundancy removal (perceptual hashing)
+5. Select best 500-2000 frames
+6. Upload frames to S3
+7. Update job status in RDS and Redis
 
-varying vec3 vColor;
-varying float vOpacity;
-varying vec2 vUV;
-
-void main() {
-  // Transform Gaussian to screen space
-  vec4 worldPos = modelMatrix * vec4(position, 1.0);
-  vec4 viewPos = viewMatrix * worldPos;
-  
-  // Apply rotation and scale
-  mat3 rotMat = quaternionToMatrix(rotation);
-  vec3 scaledPos = rotMat * (scale * vertexOffset);
-  
-  gl_Position = projectionMatrix * (viewPos + vec4(scaledPos, 0.0));
-  
-  vColor = color;
-  vOpacity = opacity;
-  vUV = uv;
-}
-
-// Fragment Shader (pseudo-code)
-varying vec3 vColor;
-varying float vOpacity;
-varying vec2 vUV;
-
-void main() {
-  // Gaussian falloff from center
-  float dist = length(vUV);
-  float gaussian = exp(-0.5 * dist * dist);
-  
-  float alpha = vOpacity * gaussian;
-  
-  if (alpha < 0.01) discard;
-  
-  gl_FragColor = vec4(vColor, alpha);
-}
+**S3 Key Structure:**
+```
+projects/{project_id}/frames/{job_id}/{frame_number}.jpg
 ```
 
-### 2. Auto-Navigation Engine
+**Output:**
+- Selected frames (JPEG, 1080p)
+- Frame metadata JSON (timestamps, quality scores)
 
-The auto-navigation engine analyzes point cloud geometry to identify optimal viewing positions and generate tour paths.
+### Stage 3: Pose Estimation
 
-**Core Classes:**
+**Flow:**
+1. Step Functions invokes GPU worker (AWS Batch)
+2. Worker downloads frames from S3
+3. Run COLMAP or similar for Structure-from-Motion:
+   - Feature extraction (SIFT/ORB)
+   - Feature matching
+   - Sparse reconstruction
+   - Camera pose estimation
+4. Generate camera parameters file
+5. Upload results to S3
+6. Update job status
 
-```typescript
-class AutoNavigationEngine {
-  private pointCloud: PointCloudData
-  private spatialIndex: OctreeIndex
-  private navigationGraph: NavigationGraph
-  
-  constructor(pointCloud: PointCloudData)
-  
-  // Main entry point for node generation
-  async generateNavigationNodes(): Promise<NavigationNode[]>
-  
-  // Analyze spatial structure
-  private analyzeGeometry(): GeometryAnalysis
-  
-  // Detect points of interest
-  private detectPOIs(analysis: GeometryAnalysis): POICandidate[]
-  
-  // Place navigation nodes at optimal positions
-  private placeNodes(pois: POICandidate[]): NavigationNode[]
-  
-  // Generate optimal tour path
-  generateTourPath(nodes: NavigationNode[]): TourPath
-  
-  // Validate line of sight between nodes
-  private hasLineOfSight(from: Vector3, to: Vector3): boolean
-}
+**S3 Key Structure:**
+```
+projects/{project_id}/poses/{job_id}/cameras.json
+projects/{project_id}/poses/{job_id}/sparse_model/
+```
 
-interface NavigationNode {
-  id: string
-  position: Vector3
-  orientation: Quaternion
-  confidence: number          // 0.0 to 1.0
-  viewRadius: number         // optimal viewing distance
-  connectedNodes: string[]   // reachable node IDs
-  poiType: POIType          // room_center, feature, entrance, etc.
-}
+**Output:**
+- Camera intrinsics and extrinsics
+- Sparse point cloud
+- Pose confidence scores
 
-interface TourPath {
-  nodes: string[]           // ordered node IDs
-  transitions: CameraTransition[]
-  totalDistance: number
-  estimatedDuration: number
-}
+### Stage 4: Scene Reconstruction (GS/NeRF)
 
-interface CameraTransition {
-  fromNode: string
-  toNode: string
-  duration: number
-  path: Vector3[]          // interpolation waypoints
-  easingFunction: string
-}
+**Flow:**
+1. Step Functions invokes GPU worker (AWS Batch, P4/P5 instance)
+2. Worker downloads frames and poses from S3
+3. Train Gaussian Splatting or NeRF model:
+   - Initialize scene representation
+   - Iterative optimization (5000-30000 iterations)
+   - Checkpoint every 1000 iterations
+   - Monitor convergence (PSNR, SSIM)
+4. Export trained model
+5. Upload to S3
+6. Update job status
 
-enum POIType {
-  ROOM_CENTER = "room_center",
-  FEATURE = "feature",
-  ENTRANCE = "entrance",
-  CORNER = "corner",
-  PRODUCT_DISPLAY = "product_display"
+**S3 Key Structure:**
+```
+projects/{project_id}/models/{job_id}/model.ply (GS)
+projects/{project_id}/models/{job_id}/model.pth (NeRF)
+```
+
+**Training Parameters:**
+- Batch size: 4-8 rays per pixel
+- Learning rate: 1e-3 with decay
+- Regularization: total variation, sparsity
+- Early stopping: PSNR plateau detection
+
+### Stage 5: Optimization
+
+**Flow:**
+1. Step Functions invokes GPU worker
+2. Worker downloads trained model from S3
+3. Apply optimizations:
+   - **Compression**: Quantize model weights (FP32 → FP16 or INT8)
+   - **LOD Generation**: Create 3-5 quality levels (high, medium, low)
+   - **Spatial Tiling**: Divide scene into 4x4 or 8x8 grid
+   - **Culling**: Remove invisible geometry
+4. Generate optimized assets per LOD and tile
+5. Upload to S3
+6. Update job status
+
+**S3 Key Structure:**
+```
+projects/{project_id}/optimized/{job_id}/lod_{level}/tile_{x}_{y}.bin
+```
+
+**LOD Strategy:**
+- High: Full quality, desktop only
+- Medium: 70% quality, default for desktop
+- Low: 40% quality, mobile devices
+- Thumbnail: 10% quality, preview
+
+### Stage 6: Packaging
+
+**Flow:**
+1. Step Functions invokes CPU worker
+2. Worker generates tour manifest:
+   - Asset references (LOD, tiles)
+   - Camera bounds and initial position
+   - Metadata (title, description, privacy)
+   - Viewer configuration
+3. Generate thumbnail images (multiple angles)
+4. Create viewer bundle (HTML + JS + assets)
+5. Upload manifest and assets to S3
+6. Invalidate CloudFront cache
+7. Update job status to "completed"
+
+**S3 Key Structure:**
+```
+projects/{project_id}/tours/{job_id}/manifest.json
+projects/{project_id}/tours/{job_id}/thumbnails/preview_{angle}.jpg
+projects/{project_id}/tours/{job_id}/viewer/index.html
+```
+
+**Manifest Schema:**
+```json
+{
+  "version": "1.0",
+  "project_id": "uuid",
+  "job_id": "uuid",
+  "created_at": "ISO8601",
+  "camera": {
+    "initial_position": [x, y, z],
+    "bounds": {"min": [x,y,z], "max": [x,y,z]}
+  },
+  "assets": {
+    "lod_high": ["tile_0_0.bin", ...],
+    "lod_medium": ["tile_0_0.bin", ...],
+    "lod_low": ["tile_0_0.bin", ...]
+  },
+  "metadata": {
+    "title": "string",
+    "privacy": "public|private",
+    "password_protected": false
+  }
 }
 ```
 
-**Navigation Node Detection Algorithm:**
+### Stage 7: Publishing
 
+**Flow:**
+1. User clicks "Publish" in dashboard
+2. Golang API generates unique tour URL
+3. API creates CloudFront signed URL (if private)
+4. API updates tour status to "published" in RDS
+5. API returns shareable link and embed code
+6. Frontend displays publish confirmation
+
+**Tour URL Format:**
 ```
-Algorithm: DetectNavigationNodes(pointCloud)
-
-1. Spatial Analysis Phase:
-   a. Build octree spatial index from point cloud
-   b. Compute point density map (points per cubic meter)
-   c. Identify open spaces (low density regions)
-   d. Detect walls and obstacles (high density planar regions)
-   e. Compute floor plane using RANSAC
-
-2. POI Detection Phase:
-   a. Identify room centers (largest open spaces)
-   b. Detect geometric features (corners, alcoves, displays)
-   c. Find entrance/exit points (transitions between spaces)
-   d. Locate high-density clusters (product displays, furniture)
-
-3. Node Placement Phase:
-   For each POI candidate:
-   a. Calculate optimal viewing position:
-      - Distance: 2-4 meters from POI
-      - Height: 1.6 meters (average eye level)
-      - Angle: facing POI center
-   b. Validate position:
-      - Check minimum spacing (1.5m from other nodes)
-      - Verify line of sight to POI
-      - Ensure position is in open space
-   c. Compute confidence score:
-      - Visibility quality (0-0.4)
-      - Spatial importance (0-0.3)
-      - Accessibility (0-0.3)
-   d. If confidence > 0.5, add node
-
-4. Node Filtering Phase:
-   a. Remove redundant nodes (similar views)
-   b. Ensure minimum node count (5 for large spaces)
-   c. Balance node distribution across space
-
-5. Return sorted nodes by confidence score
+https://tours.comic3d.com/{tour_id}
+https://cdn.comic3d.com/tours/{project_id}/{job_id}/viewer/
 ```
 
-**Tour Path Generation Algorithm:**
-
-```
-Algorithm: GenerateTourPath(nodes)
-
-1. Build Navigation Graph:
-   For each pair of nodes (A, B):
-   a. Check line of sight between A and B
-   b. If clear, add edge with weight = distance(A, B)
-   c. Store edge in adjacency list
-
-2. Find Optimal Path:
-   a. Select starting node (highest confidence near entrance)
-   b. Use modified TSP solver:
-      - Greedy nearest neighbor with backtracking
-      - Prefer paths that maintain forward motion
-      - Avoid sharp turns (> 120 degrees)
-   c. Generate ordered node sequence
-
-3. Generate Camera Transitions:
-   For each consecutive node pair:
-   a. Calculate transition duration:
-      duration = baseTime + (distance * 0.5 seconds/meter)
-      duration = clamp(duration, 1.5, 3.0)
-   b. Generate interpolation path:
-      - Use Catmull-Rom spline for smooth curves
-      - Add intermediate waypoints if path is obstructed
-   c. Select easing function:
-      - Use ease-in-out for natural acceleration
-   d. Compute orientation interpolation (SLERP)
-
-4. Return complete tour path with transitions
+**Embed Code:**
+```html
+<iframe src="https://tours.comic3d.com/{tour_id}" 
+        width="800" height="600" 
+        frameborder="0" allowfullscreen>
+</iframe>
 ```
 
-### 3. Navigation Controller
+## Orchestration Strategy
 
-Manages user interaction and camera movement during tours.
+### Step Functions State Machine
 
-**Core Classes:**
+**States:**
+1. **ValidateInput**: Check video metadata
+2. **SampleFrames**: Extract and filter frames (CPU worker)
+3. **EstimatePoses**: Run SfM pipeline (GPU worker)
+4. **ReconstructScene**: Train GS/NeRF (GPU worker)
+5. **OptimizeModel**: Compress and generate LODs (GPU worker)
+6. **PackageTour**: Create manifest and viewer (CPU worker)
+7. **NotifyCompletion**: Send webhook/email
 
-```typescript
-class NavigationController {
-  private renderer: GaussianSplatRenderer
-  private currentNode: NavigationNode | null
-  private tourPath: TourPath
-  private isTransitioning: boolean
-  private guidedModeActive: boolean
-  
-  constructor(renderer: GaussianSplatRenderer, tourPath: TourPath)
-  
-  // Navigate to specific node
-  async navigateToNode(nodeId: string): Promise<void>
-  
-  // Start guided tour mode
-  startGuidedTour(): void
-  
-  // Stop guided tour mode
-  stopGuidedTour(): void
-  
-  // Handle user click on navigation node
-  handleNodeClick(nodeId: string): void
-  
-  // Update camera during transition
-  private updateTransition(deltaTime: number): void
-  
-  // Get list of reachable nodes from current position
-  getReachableNodes(): NavigationNode[]
-}
+**Error Handling:**
+- Each state has retry policy (max 3 attempts, exponential backoff)
+- Catch blocks for specific errors (GPU OOM, S3 access denied)
+- Fallback states for graceful degradation
+- Dead letter queue for unrecoverable failures
 
-class CameraAnimator {
-  private startPosition: Vector3
-  private endPosition: Vector3
-  private startOrientation: Quaternion
-  private endOrientation: Quaternion
-  private duration: number
-  private elapsed: number
-  private easingFunction: EasingFunction
-  
-  constructor(transition: CameraTransition)
-  
-  // Update animation state
-  update(deltaTime: number): CameraState
-  
-  // Check if animation is complete
-  isComplete(): boolean
-  
-  // Apply easing function to linear progress
-  private ease(t: number): number
-}
+**Idempotency:**
+- Each state checks Redis for completion status
+- S3 keys include job_id to prevent collisions
+- Database updates use optimistic locking
 
-interface CameraState {
-  position: Vector3
-  target: Vector3
-  orientation: Quaternion
-  fov: number
-}
+**Job Resume:**
+- State machine execution ARN stored in RDS
+- On failure, user can trigger resume from last successful state
+- Checkpoints stored in S3 for long-running states (training)
 
-type EasingFunction = (t: number) => number
+### Job Queue and Worker Pools
 
-// Common easing functions
-const Easing = {
-  easeInOutCubic: (t: number) => t < 0.5 
-    ? 4 * t * t * t 
-    : 1 - Math.pow(-2 * t + 2, 3) / 2,
-    
-  easeInOutQuad: (t: number) => t < 0.5 
-    ? 2 * t * t 
-    : 1 - Math.pow(-2 * t + 2, 2) / 2
-}
-```
+**Queue Architecture:**
+- SQS queue per worker type (cpu_queue, gpu_queue)
+- Priority queues for premium customers
+- Dead letter queue for failed jobs
 
-### 4. Hotspot Manager
+**Worker Pools:**
+- **CPU Pool**: ECS Fargate tasks, auto-scale 10-100 instances
+- **GPU Pool**: AWS Batch with EC2 Spot instances (G5/P4), 5-50 instances
 
-Manages interactive annotations in 3D space.
+**Auto-scaling Triggers:**
+- Scale up: Queue depth >10 messages for >5 minutes
+- Scale down: Queue depth <2 messages for >10 minutes
+- GPU pool: Prefer Spot instances, fallback to On-Demand if unavailable
 
-**Core Classes:**
+**Resource Allocation:**
+- CPU tasks: 4 vCPU, 8GB RAM
+- GPU tasks: 16 vCPU, 64GB RAM, 1-4 GPUs (depending on stage)
 
-```typescript
-class HotspotManager {
-  private hotspots: Map<string, Hotspot>
-  private renderer: GaussianSplatRenderer
-  private activeHotspot: Hotspot | null
-  
-  constructor(renderer: GaussianSplatRenderer)
-  
-  // Add new hotspot
-  addHotspot(hotspot: Hotspot): void
-  
-  // Remove hotspot
-  removeHotspot(id: string): void
-  
-  // Update hotspot screen positions
-  updatePositions(camera: CameraState): void
-  
-  // Handle hotspot click
-  handleHotspotClick(id: string): void
-  
-  // Get hotspots visible from current camera position
-  getVisibleHotspots(camera: CameraState): Hotspot[]
-}
+## Data Design
 
-interface Hotspot {
-  id: string
-  position: Vector3
-  content: HotspotContent
-  icon: string
-  scale: number
-  alwaysVisible: boolean
-}
+### PostgreSQL Schema
 
-interface HotspotContent {
-  title: string
-  description: string
-  images: string[]
-  links: HotspotLink[]
-}
-
-interface HotspotLink {
-  text: string
-  url: string
-  type: "external" | "navigation"
-}
-```
-
-### 5. Content Manager
-
-Handles tour upload, processing, and storage.
-
-**Core Classes:**
-
-```typescript
-class ContentManager {
-  private storage: StorageService
-  private processor: PointCloudProcessor
-  private navEngine: AutoNavigationEngine
-  
-  constructor(storage: StorageService)
-  
-  // Upload and process new tour
-  async uploadTour(file: File, metadata: TourMetadata): Promise<Tour>
-  
-  // Get tour by ID
-  async getTour(tourId: string): Promise<Tour>
-  
-  // Update tour configuration
-  async updateTour(tourId: string, updates: TourUpdates): Promise<Tour>
-  
-  // Delete tour
-  async deleteTour(tourId: string): Promise<void>
-  
-  // List tours for creator
-  async listTours(creatorId: string): Promise<Tour[]>
-}
-
-class PointCloudProcessor {
-  // Validate .ply file format
-  async validatePLY(file: File): Promise<ValidationResult>
-  
-  // Process point cloud for rendering
-  async processPointCloud(file: File): Promise<ProcessedPointCloud>
-  
-  // Generate preview thumbnail
-  async generateThumbnail(pointCloud: ProcessedPointCloud): Promise<Blob>
-  
-  // Optimize point cloud for web delivery
-  async optimizeForWeb(pointCloud: ProcessedPointCloud): Promise<OptimizedPointCloud>
-}
-
-interface Tour {
-  id: string
-  creatorId: string
-  name: string
-  description: string
-  pointCloudUrl: string
-  navigationNodes: NavigationNode[]
-  tourPath: TourPath
-  hotspots: Hotspot[]
-  settings: TourSettings
-  analytics: TourAnalytics
-  createdAt: Date
-  updatedAt: Date
-}
-
-interface TourSettings {
-  isPublic: boolean
-  allowEmbedding: boolean
-  autoStartGuidedTour: boolean
-  showNavigationNodes: boolean
-  transitionSpeed: number  // 0.5x to 2.0x
-}
-
-interface TourMetadata {
-  name: string
-  description: string
-  tags: string[]
-  category: "retail" | "showroom" | "real_estate"
-}
-```
-
-### 6. Analytics Service
-
-Tracks and aggregates user engagement data.
-
-**Core Classes:**
-
-```typescript
-class AnalyticsService {
-  private database: AnalyticsDatabase
-  private eventQueue: EventQueue
-  
-  constructor(database: AnalyticsDatabase)
-  
-  // Track navigation event
-  trackNavigation(tourId: string, viewerId: string, nodeId: string): void
-  
-  // Track hotspot interaction
-  trackHotspotClick(tourId: string, viewerId: string, hotspotId: string): void
-  
-  // Track tour session
-  trackSession(tourId: string, viewerId: string, duration: number): void
-  
-  // Get analytics for tour
-  async getAnalytics(tourId: string, timeRange: TimeRange): Promise<TourAnalytics>
-  
-  // Flush queued events to database
-  private async flushEvents(): Promise<void>
-}
-
-interface TourAnalytics {
-  totalViews: number
-  uniqueViewers: number
-  averageDuration: number
-  nodeVisits: Map<string, number>
-  hotspotClicks: Map<string, number>
-  completionRate: number  // % who reached final node
-  bounceRate: number      // % who left within 10 seconds
-}
-
-interface AnalyticsEvent {
-  tourId: string
-  viewerId: string
-  eventType: "navigation" | "hotspot_click" | "session_start" | "session_end"
-  timestamp: Date
-  data: Record<string, any>
-}
-```
-
-## Data Models
-
-### Point Cloud Data Structure
-
-```typescript
-interface PointCloudData {
-  header: PLYHeader
-  vertices: VertexData[]
-  metadata: PointCloudMetadata
-}
-
-interface PLYHeader {
-  format: "ascii" | "binary_little_endian" | "binary_big_endian"
-  version: string
-  elements: ElementDefinition[]
-  comments: string[]
-}
-
-interface ElementDefinition {
-  name: string
-  count: number
-  properties: PropertyDefinition[]
-}
-
-interface PropertyDefinition {
-  type: "float" | "double" | "int" | "uchar"
-  name: string
-}
-
-interface VertexData {
-  x: number
-  y: number
-  z: number
-  nx?: number  // normal x
-  ny?: number  // normal y
-  nz?: number  // normal z
-  red: number
-  green: number
-  blue: number
-  alpha?: number
-  scale_0?: number
-  scale_1?: number
-  scale_2?: number
-  rot_0?: number
-  rot_1?: number
-  rot_2?: number
-  rot_3?: number
-}
-
-interface PointCloudMetadata {
-  bounds: BoundingBox
-  pointCount: number
-  hasNormals: boolean
-  hasColors: boolean
-  hasGaussianData: boolean
-  fileSize: number
-}
-
-interface BoundingBox {
-  min: Vector3
-  max: Vector3
-  center: Vector3
-  size: Vector3
-}
-```
-
-### Database Schema
-
+**users**
 ```sql
--- Tours table
-CREATE TABLE tours (
-  id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
-  creator_id UUID NOT NULL REFERENCES users(id),
-  name VARCHAR(255) NOT NULL,
-  description TEXT,
-  point_cloud_url TEXT NOT NULL,
-  thumbnail_url TEXT,
-  category VARCHAR(50),
-  is_public BOOLEAN DEFAULT false,
-  allow_embedding BOOLEAN DEFAULT true,
+CREATE TABLE users (
+  id UUID PRIMARY KEY,
+  email VARCHAR(255) UNIQUE NOT NULL,
+  cognito_sub VARCHAR(255) UNIQUE NOT NULL,
+  name VARCHAR(255),
+  role VARCHAR(50) DEFAULT 'owner',
   created_at TIMESTAMP DEFAULT NOW(),
   updated_at TIMESTAMP DEFAULT NOW()
 );
+```
 
--- Navigation nodes table
-CREATE TABLE navigation_nodes (
-  id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
-  tour_id UUID NOT NULL REFERENCES tours(id) ON DELETE CASCADE,
-  position_x FLOAT NOT NULL,
-  position_y FLOAT NOT NULL,
-  position_z FLOAT NOT NULL,
-  orientation_x FLOAT NOT NULL,
-  orientation_y FLOAT NOT NULL,
-  orientation_z FLOAT NOT NULL,
-  orientation_w FLOAT NOT NULL,
-  confidence FLOAT NOT NULL,
-  view_radius FLOAT NOT NULL,
-  poi_type VARCHAR(50),
-  sequence_order INTEGER,
-  is_auto_generated BOOLEAN DEFAULT true
-);
-
--- Hotspots table
-CREATE TABLE hotspots (
-  id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
-  tour_id UUID NOT NULL REFERENCES tours(id) ON DELETE CASCADE,
-  position_x FLOAT NOT NULL,
-  position_y FLOAT NOT NULL,
-  position_z FLOAT NOT NULL,
+**projects**
+```sql
+CREATE TABLE projects (
+  id UUID PRIMARY KEY,
+  user_id UUID REFERENCES users(id) ON DELETE CASCADE,
   title VARCHAR(255) NOT NULL,
   description TEXT,
-  icon VARCHAR(50),
-  scale FLOAT DEFAULT 1.0,
-  always_visible BOOLEAN DEFAULT false,
+  privacy VARCHAR(20) DEFAULT 'private',
+  password_hash VARCHAR(255),
+  created_at TIMESTAMP DEFAULT NOW(),
+  updated_at TIMESTAMP DEFAULT NOW()
+);
+```
+
+**jobs**
+```sql
+CREATE TABLE jobs (
+  id UUID PRIMARY KEY,
+  project_id UUID REFERENCES projects(id) ON DELETE CASCADE,
+  status VARCHAR(50) DEFAULT 'pending',
+  stage VARCHAR(50),
+  progress INT DEFAULT 0,
+  error_message TEXT,
+  execution_arn VARCHAR(500),
+  video_s3_key VARCHAR(500),
+  manifest_s3_key VARCHAR(500),
+  created_at TIMESTAMP DEFAULT NOW(),
+  updated_at TIMESTAMP DEFAULT NOW(),
+  completed_at TIMESTAMP
+);
+```
+
+**tours**
+```sql
+CREATE TABLE tours (
+  id UUID PRIMARY KEY,
+  project_id UUID REFERENCES projects(id) ON DELETE CASCADE,
+  job_id UUID REFERENCES jobs(id),
+  version INT DEFAULT 1,
+  status VARCHAR(50) DEFAULT 'draft',
+  tour_url VARCHAR(500) UNIQUE,
+  manifest_s3_key VARCHAR(500),
+  thumbnail_s3_key VARCHAR(500),
+  published_at TIMESTAMP,
   created_at TIMESTAMP DEFAULT NOW()
 );
+```
 
--- Hotspot images table
-CREATE TABLE hotspot_images (
-  id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
-  hotspot_id UUID NOT NULL REFERENCES hotspots(id) ON DELETE CASCADE,
-  image_url TEXT NOT NULL,
-  sequence_order INTEGER
+**permissions**
+```sql
+CREATE TABLE permissions (
+  id UUID PRIMARY KEY,
+  project_id UUID REFERENCES projects(id) ON DELETE CASCADE,
+  user_id UUID REFERENCES users(id) ON DELETE CASCADE,
+  role VARCHAR(50) DEFAULT 'viewer',
+  created_at TIMESTAMP DEFAULT NOW()
 );
+```
 
--- Analytics events table
-CREATE TABLE analytics_events (
-  id BIGSERIAL PRIMARY KEY,
-  tour_id UUID NOT NULL REFERENCES tours(id) ON DELETE CASCADE,
-  viewer_id VARCHAR(255) NOT NULL,
-  event_type VARCHAR(50) NOT NULL,
-  event_data JSONB,
-  timestamp TIMESTAMP DEFAULT NOW()
+**analytics_summary**
+```sql
+CREATE TABLE analytics_summary (
+  id UUID PRIMARY KEY,
+  tour_id UUID REFERENCES tours(id) ON DELETE CASCADE,
+  date DATE NOT NULL,
+  views INT DEFAULT 0,
+  unique_visitors INT DEFAULT 0,
+  avg_duration_seconds INT DEFAULT 0,
+  device_mobile INT DEFAULT 0,
+  device_desktop INT DEFAULT 0,
+  UNIQUE(tour_id, date)
 );
-
--- Create indexes for common queries
-CREATE INDEX idx_tours_creator ON tours(creator_id);
-CREATE INDEX idx_tours_public ON tours(is_public) WHERE is_public = true;
-CREATE INDEX idx_nodes_tour ON navigation_nodes(tour_id);
-CREATE INDEX idx_hotspots_tour ON hotspots(tour_id);
-CREATE INDEX idx_analytics_tour_time ON analytics_events(tour_id, timestamp);
 ```
 
-## Correctness Properties
-
-*A property is a characteristic or behavior that should hold true across all valid executions of a system—essentially, a formal statement about what the system should do. Properties serve as the bridge between human-readable specifications and machine-verifiable correctness guarantees.*
-
-
-### Property 1: Navigation Node Minimum Spacing
-
-*For any* set of generated Navigation_Nodes in a scene, all pairs of nodes must be separated by at least 1.5 meters in 3D space.
-
-**Validates: Requirements 1.3**
-
-### Property 2: Navigation Node Confidence Bounds
-
-*For any* Navigation_Node generated by the Auto_Navigation_Engine, the confidence score must be a value between 0.0 and 1.0 inclusive.
-
-**Validates: Requirements 1.4**
-
-### Property 3: Minimum Node Count for Large Spaces
-
-*For any* point cloud representing a space larger than 50 square meters, the Auto_Navigation_Engine must generate at least 5 Navigation_Nodes.
-
-**Validates: Requirements 1.5**
-
-### Property 4: Optimal Tour Path Generation
-
-*For any* set of Navigation_Nodes with valid connectivity, the Auto_Navigation_Engine must generate a Tour_Path that visits each node exactly once and has the shortest total distance among all valid paths.
-
-**Validates: Requirements 2.3, 2.4**
-
-### Property 5: Tour Path Obstacle Avoidance
-
-*For any* generated Tour_Path in a scene with obstacles, all Camera_Transitions in the path must maintain clear line of sight and avoid passing through geometry.
-
-**Validates: Requirements 2.2, 12.5**
-
-### Property 6: PLY File Round-Trip Consistency
-
-*For any* valid .ply file, loading the file into the Gaussian_Splat_Renderer and then exporting it should produce data equivalent to the original file structure.
-
-**Validates: Requirements 3.1**
-
-### Property 7: Camera Transition Duration Bounds
-
-*For any* Camera_Transition between Navigation_Nodes, the transition duration must be between 1.5 and 3.0 seconds, with longer distances resulting in proportionally longer durations within this range.
-
-**Validates: Requirements 4.2, 12.3**
-
-### Property 8: Camera Transition Completion Accuracy
-
-*For any* Camera_Transition to a target Navigation_Node, when the transition completes, the camera position and orientation must match the target node's position and optimal viewing angle within acceptable tolerance (0.1 meters, 5 degrees).
-
-**Validates: Requirements 4.3**
-
-### Property 9: Navigation Blocking During Transitions
-
-*For any* active Camera_Transition, all new navigation commands must be rejected until the transition completes.
-
-**Validates: Requirements 4.4**
-
-### Property 10: Guided Tour Round-Trip
-
-*For any* tour with a defined Tour_Path, activating guided mode and allowing it to complete should return the camera to the starting Navigation_Node position.
-
-**Validates: Requirements 5.3**
-
-### Property 11: Manual Navigation Exits Guided Mode
-
-*For any* tour in guided mode, any manual navigation action by the viewer must immediately exit guided mode and stop automatic progression.
-
-**Validates: Requirements 5.4**
-
-### Property 12: Hotspot 3D Position Persistence
-
-*For any* Hotspot placed at 3D coordinates, retrieving the hotspot data must return the exact same 3D coordinates that were originally specified.
-
-**Validates: Requirements 6.1**
-
-### Property 13: Hotspot Screen Position Tracking
-
-*For any* visible Hotspot and camera movement, the hotspot's screen position must continuously update to maintain correct projection from its fixed 3D coordinates to 2D screen space.
-
-**Validates: Requirements 6.2, 6.5**
-
-### Property 14: Hotspot Content Type Support
-
-*For any* Hotspot, the system must support storing and retrieving content containing text, images, and hyperlinks without data loss.
-
-**Validates: Requirements 6.4**
-
-### Property 15: File Validation Rejects Invalid PLY Files
-
-*For any* uploaded file that does not conform to valid .ply format specifications, the Content_Manager must reject the upload and provide a descriptive error message.
-
-**Validates: Requirements 7.2**
-
-### Property 16: Unique Tour Identifier Generation
-
-*For any* set of uploaded tours, all generated tour identifiers must be unique across the system.
-
-**Validates: Requirements 7.3, 13.1**
-
-### Property 17: Tour Access Control Enforcement
-
-*For any* tour set to private, access attempts without a valid access token must be rejected, while tours set to public must be accessible without authentication.
-
-**Validates: Requirements 7.4, 13.4, 13.5**
-
-### Property 18: Node Modification Triggers Path Recalculation
-
-*For any* modification to the Navigation_Nodes in a tour (add, remove, or reposition), the Auto_Navigation_Engine must automatically recalculate the Tour_Path to reflect the changes.
-
-**Validates: Requirements 8.2**
-
-### Property 19: Custom Tour Path Persistence
-
-*For any* manually overridden Tour_Path sequence, saving the configuration must persist the custom sequence exactly as specified, and subsequent loads must retrieve the same sequence.
-
-**Validates: Requirements 8.3, 8.4**
-
-### Property 20: Touch Gesture Navigation
-
-*For any* mobile device with touch input, touch gestures (tap, swipe, pinch) must trigger the corresponding navigation and interaction actions.
-
-**Validates: Requirements 9.3**
-
-### Property 21: Responsive UI Adaptation
-
-*For any* viewport size and orientation change, the Virtual_Tour_System must adapt the UI layout to fit the available screen space while maintaining functionality.
-
-**Validates: Requirements 9.5**
-
-### Property 22: Analytics Event Recording
-
-*For any* user interaction (navigation, hotspot click, session start/end), the Analytics_Engine must record an event with accurate timestamp and associated data.
-
-**Validates: Requirements 10.1, 10.2, 10.3**
-
-### Property 23: Analytics Aggregation Consistency
-
-*For any* set of recorded analytics events for a tour, the aggregated statistics (total views, average duration, node visits) must accurately reflect the sum and averages of the individual events.
-
-**Validates: Requirements 10.4, 10.5**
-
-### Property 24: Progressive Loading Maintains Interactivity
-
-*For any* tour being loaded over a limited bandwidth connection, the system must remain interactive (accepting navigation commands) even while higher quality data is still loading.
-
-**Validates: Requirements 11.3**
-
-### Property 25: Browser Cache Utilization
-
-*For any* tour accessed multiple times by the same browser, the second and subsequent loads must utilize cached Point_Cloud data, resulting in faster load times than the initial load.
-
-**Validates: Requirements 11.4**
-
-### Property 26: Camera Rotation Speed Limit
-
-*For any* Camera_Transition, the instantaneous camera rotation speed must never exceed 90 degrees per second at any point during the transition.
-
-**Validates: Requirements 12.2**
-
-### Property 27: Horizon Stability During Transitions
-
-*For any* Camera_Transition where the source and target nodes have the same orientation, the camera's roll angle must remain constant throughout the transition (stable horizon line).
-
-**Validates: Requirements 12.4**
-
-### Property 28: Embeddable Code Generation
-
-*For any* published tour, the system must generate valid HTML iframe embed code that, when used on an external website, successfully loads and displays the tour.
-
-**Validates: Requirements 13.2**
-
-### Property 29: Keyboard Accessibility
-
-*For any* interactive element in the Virtual_Tour_System (navigation nodes, hotspots, controls), the element must be reachable and activatable using only keyboard input (tab, enter, arrow keys).
-
-**Validates: Requirements 14.1**
-
-### Property 30: Screen Reader Compatibility
-
-*For any* Navigation_Node and Hotspot, the system must provide appropriate ARIA labels and announcements that screen reader software can interpret and announce to users.
-
-**Validates: Requirements 14.3**
-
-### Property 31: Transition Speed Adjustment
-
-*For any* Camera_Transition with a speed multiplier set between 0.5x and 2.0x, the actual transition duration must be the base duration divided by the multiplier.
-
-**Validates: Requirements 14.4**
-
-### Property 32: Text-Based Tour Overview Completeness
-
-*For any* tour, the text-based overview must list all Navigation_Nodes and Hotspots present in the tour without omissions.
-
-**Validates: Requirements 14.5**
-
-### Property 33: Offline Functionality with Cache
-
-*For any* tour that has been fully loaded and cached, losing network connectivity must not prevent continued navigation and interaction with the cached tour data.
-
-**Validates: Requirements 15.3**
-
-### Property 34: Error Logging Without Exposure
-
-*For any* error that occurs in the system, diagnostic information must be logged to the console or error tracking service, while the user-facing error message must not contain technical implementation details.
-
-**Validates: Requirements 15.5**
-
-## Error Handling
-
-### Error Categories
-
-The system handles errors across several categories:
-
-1. **File Processing Errors**
-   - Invalid .ply file format
-   - Corrupted point cloud data
-   - File size exceeds limits
-   - Unsupported file encoding
-
-2. **Rendering Errors**
-   - WebGL context loss
-   - Shader compilation failures
-   - Out of memory conditions
-   - GPU driver issues
-
-3. **Network Errors**
-   - Failed file uploads
-   - Connection timeouts
-   - Interrupted downloads
-   - API request failures
-
-4. **Navigation Errors**
-   - Invalid node references
-   - Unreachable navigation targets
-   - Collision detection failures
-   - Path computation errors
-
-5. **User Input Errors**
-   - Invalid configuration values
-   - Malformed hotspot data
-   - Unauthorized access attempts
-   - Invalid tour settings
-
-### Error Handling Strategies
-
-**Graceful Degradation:**
-```typescript
-class ErrorHandler {
-  // Handle rendering errors with fallback
-  handleRenderError(error: RenderError): void {
-    console.error('Render error:', error)
-    
-    // Attempt recovery strategies in order
-    if (this.canRecoverWebGLContext()) {
-      this.recoverWebGLContext()
-    } else if (this.canReduceQuality()) {
-      this.reduceRenderQuality()
-    } else {
-      this.showFallbackView()
-    }
-  }
-  
-  // Handle network errors with retry
-  async handleNetworkError(error: NetworkError): Promise<void> {
-    console.error('Network error:', error)
-    
-    if (this.hasCachedData()) {
-      this.useCachedData()
-      this.showOfflineNotification()
-    } else {
-      await this.retryWithBackoff(error.request, 3)
-    }
-  }
-  
-  // Handle file processing errors
-  handleFileError(error: FileError): void {
-    console.error('File error:', error)
-    
-    const userMessage = this.getUserFriendlyMessage(error)
-    this.showErrorDialog(userMessage, this.getSuggestedActions(error))
-  }
-  
-  private getUserFriendlyMessage(error: Error): string {
-    // Map technical errors to user-friendly messages
-    const errorMessages: Record<string, string> = {
-      'INVALID_PLY_FORMAT': 'The uploaded file is not a valid .ply file. Please check the file format.',
-      'FILE_TOO_LARGE': 'The file size exceeds the 500MB limit. Please use a smaller file.',
-      'WEBGL_NOT_SUPPORTED': 'Your browser does not support WebGL 2.0. Please use a modern browser like Chrome, Firefox, or Edge.',
-      'OUT_OF_MEMORY': 'The tour is too large for your device. Try closing other applications or use a device with more memory.'
-    }
-    
-    return errorMessages[error.code] || 'An unexpected error occurred. Please try again.'
+**Indexes:**
+```sql
+CREATE INDEX idx_projects_user_id ON projects(user_id);
+CREATE INDEX idx_jobs_project_id ON jobs(project_id);
+CREATE INDEX idx_jobs_status ON jobs(status);
+CREATE INDEX idx_tours_project_id ON tours(project_id);
+CREATE INDEX idx_analytics_tour_date ON analytics_summary(tour_id, date);
+```
+
+### S3 Key Layout
+
+**Structure:**
+```
+/projects/{project_id}/
+  /raw/{job_id}/
+    video.mp4
+  /frames/{job_id}/
+    {frame_number}.jpg
+    metadata.json
+  /poses/{job_id}/
+    cameras.json
+    sparse_model/
+  /models/{job_id}/
+    model.ply (or model.pth)
+    checkpoints/
+  /optimized/{job_id}/
+    lod_high/tile_{x}_{y}.bin
+    lod_medium/tile_{x}_{y}.bin
+    lod_low/tile_{x}_{y}.bin
+  /tours/{job_id}/
+    manifest.json
+    thumbnails/preview_{angle}.jpg
+    viewer/index.html
+```
+
+**Versioning:**
+- Enable S3 versioning for tours/ to support rollback
+- Keep last 5 versions, delete older
+
+**Lifecycle Policies:**
+- Move raw videos to Glacier after 90 days
+- Move frames to Glacier after 30 days
+- Delete checkpoints after 7 days
+- Keep tours indefinitely (or until project deleted)
+
+### Redis Key and TTL Strategy
+
+**Key Patterns:**
+```
+job:{job_id}:status          -> JSON (TTL: 24h after completion)
+job:{job_id}:progress        -> INT (TTL: 24h after completion)
+tour:{tour_id}:manifest      -> JSON (TTL: 1h)
+tour:{tour_id}:permissions   -> JSON (TTL: 15m)
+user:{user_id}:session       -> JSON (TTL: 1h)
+signed_url:{tour_id}         -> STRING (TTL: 5m)
+rate_limit:{user_id}:{api}   -> INT (TTL: 1m)
+```
+
+**Cache Strategy:**
+- Write-through for job status updates
+- Cache-aside for tour manifests
+- Lazy loading for permissions
+- Invalidate on updates (publish, privacy change)
+
+### Analytics Event Model
+
+**Event Schema (stored in S3 as JSON lines):**
+```json
+{
+  "event_id": "uuid",
+  "event_type": "tour_view|interaction|exit",
+  "tour_id": "uuid",
+  "visitor_id": "uuid",
+  "timestamp": "ISO8601",
+  "session_id": "uuid",
+  "device_type": "mobile|desktop",
+  "browser": "string",
+  "location": {"country": "string", "city": "string"},
+  "data": {
+    "duration_seconds": 120,
+    "interactions": 15,
+    "nodes_visited": ["node1", "node2"]
   }
 }
 ```
 
-**Retry Logic:**
-```typescript
-class RetryHandler {
-  async retryWithBackoff<T>(
-    operation: () => Promise<T>,
-    maxRetries: number,
-    baseDelay: number = 1000
-  ): Promise<T> {
-    for (let attempt = 0; attempt < maxRetries; attempt++) {
-      try {
-        return await operation()
-      } catch (error) {
-        if (attempt === maxRetries - 1) throw error
-        
-        const delay = baseDelay * Math.pow(2, attempt)
-        await this.sleep(delay)
-      }
-    }
-    
-    throw new Error('Max retries exceeded')
+**Storage Pattern:**
+```
+/analytics/events/year={YYYY}/month={MM}/day={DD}/hour={HH}/{uuid}.json
+```
+
+**Athena Table:**
+```sql
+CREATE EXTERNAL TABLE analytics_events (
+  event_id STRING,
+  event_type STRING,
+  tour_id STRING,
+  visitor_id STRING,
+  timestamp STRING,
+  session_id STRING,
+  device_type STRING,
+  browser STRING,
+  location STRUCT<country:STRING, city:STRING>,
+  data STRUCT<duration_seconds:INT, interactions:INT, nodes_visited:ARRAY<STRING>>
+)
+PARTITIONED BY (year STRING, month STRING, day STRING, hour STRING)
+STORED AS JSON
+LOCATION 's3://bucket/analytics/events/';
+```
+
+**QuickSight Dashboards:**
+- Total views over time
+- Unique visitors by geography
+- Average session duration
+- Device type distribution
+- Most popular tours
+- Engagement funnel
+
+## API Design
+
+### Core Endpoints
+
+**Authentication**
+```
+POST /api/v1/auth/signup
+POST /api/v1/auth/login
+POST /api/v1/auth/logout
+POST /api/v1/auth/refresh
+GET  /api/v1/auth/me
+```
+
+**Projects**
+```
+POST   /api/v1/projects
+GET    /api/v1/projects
+GET    /api/v1/projects/{id}
+PATCH  /api/v1/projects/{id}
+DELETE /api/v1/projects/{id}
+```
+
+**Upload**
+```
+POST /api/v1/projects/{id}/upload/init
+  Request: {"filename": "video.mp4", "size": 1024000}
+  Response: {"upload_id": "uuid", "presigned_url": "s3://..."}
+
+POST /api/v1/projects/{id}/upload/complete
+  Request: {"upload_id": "uuid"}
+  Response: {"job_id": "uuid", "status": "queued"}
+```
+
+**Jobs**
+```
+GET /api/v1/jobs/{id}
+  Response: {
+    "id": "uuid",
+    "status": "processing",
+    "stage": "pose_estimation",
+    "progress": 45,
+    "estimated_completion": "ISO8601"
   }
-  
-  private sleep(ms: number): Promise<void> {
-    return new Promise(resolve => setTimeout(resolve, ms))
+
+POST /api/v1/jobs/{id}/retry
+POST /api/v1/jobs/{id}/cancel
+GET  /api/v1/jobs/{id}/logs
+```
+
+**Tours**
+```
+GET    /api/v1/tours/{id}
+PATCH  /api/v1/tours/{id}
+POST   /api/v1/tours/{id}/publish
+DELETE /api/v1/tours/{id}
+GET    /api/v1/tours/{id}/analytics
+GET    /api/v1/tours/{id}/embed-code
+```
+
+**Analytics**
+```
+GET /api/v1/analytics/tours/{id}
+  Query: ?start_date=YYYY-MM-DD&end_date=YYYY-MM-DD
+  Response: {
+    "views": 1234,
+    "unique_visitors": 567,
+    "avg_duration": 180,
+    "device_breakdown": {"mobile": 60, "desktop": 40}
   }
+
+POST /api/v1/analytics/events
+  Request: {"event_type": "tour_view", "tour_id": "uuid", ...}
+  Response: {"status": "recorded"}
+```
+
+**WebSocket**
+```
+WS /api/v1/jobs/{id}/status
+  Message: {
+    "job_id": "uuid",
+    "status": "processing",
+    "stage": "reconstruction",
+    "progress": 67,
+    "message": "Training iteration 15000/30000"
+  }
+```
+
+### Example Request/Response
+
+**Create Project and Upload Video:**
+```bash
+# 1. Create project
+curl -X POST https://api.comic3d.com/v1/projects \
+  -H "Authorization: Bearer {token}" \
+  -H "Content-Type: application/json" \
+  -d '{"title": "My Store Tour", "description": "Virtual tour of retail space"}'
+
+Response:
+{
+  "id": "proj_123",
+  "title": "My Store Tour",
+  "created_at": "2026-02-15T10:00:00Z"
+}
+
+# 2. Initialize upload
+curl -X POST https://api.comic3d.com/v1/projects/proj_123/upload/init \
+  -H "Authorization: Bearer {token}" \
+  -d '{"filename": "store_walkthrough.mp4", "size": 524288000}'
+
+Response:
+{
+  "upload_id": "upload_456",
+  "presigned_url": "https://s3.amazonaws.com/bucket/...",
+  "expires_at": "2026-02-15T11:00:00Z"
+}
+
+# 3. Upload to S3 (direct)
+curl -X PUT "{presigned_url}" \
+  --upload-file store_walkthrough.mp4
+
+# 4. Complete upload
+curl -X POST https://api.comic3d.com/v1/projects/proj_123/upload/complete \
+  -H "Authorization: Bearer {token}" \
+  -d '{"upload_id": "upload_456"}'
+
+Response:
+{
+  "job_id": "job_789",
+  "status": "queued",
+  "estimated_duration": "4-6 hours"
 }
 ```
 
-**Error Boundaries:**
-```typescript
-class TourErrorBoundary extends React.Component {
-  state = { hasError: false, error: null }
-  
-  static getDerivedStateFromError(error: Error) {
-    return { hasError: true, error }
-  }
-  
-  componentDidCatch(error: Error, errorInfo: React.ErrorInfo) {
-    // Log to error tracking service
-    errorTracker.logError(error, {
-      componentStack: errorInfo.componentStack,
-      tourId: this.props.tourId,
-      userId: this.props.userId
-    })
-  }
-  
-  render() {
-    if (this.state.hasError) {
-      return (
-        <ErrorFallback
-          error={this.state.error}
-          onRetry={() => this.setState({ hasError: false, error: null })}
-        />
-      )
-    }
-    
-    return this.props.children
-  }
+## Security Design
+
+### Authentication and Authorization
+
+**Cognito Integration:**
+- User pools for authentication
+- Identity pools for AWS resource access
+- MFA support (TOTP, SMS)
+- Social login (Google, Facebook) optional
+- JWT tokens with 1-hour expiration
+- Refresh tokens with 30-day expiration
+
+**IAM Boundaries:**
+- Separate roles for frontend, backend, workers
+- Least privilege principle
+- Service-to-service authentication via IAM roles
+- Cross-account access for multi-tenant isolation
+
+**RBAC Model:**
+```
+Roles:
+- owner: Full access to own projects
+- collaborator: Edit access to shared projects
+- viewer: Read-only access to shared projects
+- admin: System-wide administrative access
+
+Permissions:
+- project:create, project:read, project:update, project:delete
+- tour:publish, tour:unpublish, tour:analytics
+- job:retry, job:cancel
+- user:manage (admin only)
+```
+
+### Encryption
+
+**At Rest (KMS):**
+- S3 bucket encryption with customer-managed keys
+- RDS encryption with automatic key rotation
+- ElastiCache encryption enabled
+- Secrets Manager for API keys and credentials
+
+**In Transit (TLS 1.3):**
+- CloudFront with TLS 1.3 minimum
+- ALB with TLS 1.3 minimum
+- Certificate management via ACM
+- HSTS headers enforced
+
+### Access Control
+
+**Private Tours:**
+- Signed URLs with expiration (default 1 hour)
+- Optional password protection (bcrypt hashed)
+- IP whitelisting for enterprise customers
+- Referrer checking for embedded tours
+
+**Signed URL Generation:**
+```python
+def generate_signed_url(tour_id: str, expiration: int = 3600) -> str:
+    cloudfront_signer = CloudFrontSigner(key_id, private_key)
+    url = f"https://cdn.comic3d.com/tours/{tour_id}/"
+    expires = datetime.now() + timedelta(seconds=expiration)
+    return cloudfront_signer.generate_presigned_url(url, date_less_than=expires)
+```
+
+### WAF Rules
+
+**Protection Against:**
+- SQL injection (SQLi)
+- Cross-site scripting (XSS)
+- Rate limiting (100 req/min per IP)
+- Geographic blocking (optional)
+- Known bad IPs (AWS managed rules)
+- Large request bodies (>10MB blocked)
+
+**Rate Limiting Strategy:**
+```
+Tier 1 (Free): 10 uploads/month, 1000 views/month
+Tier 2 (Pro): 100 uploads/month, 50000 views/month
+Tier 3 (Enterprise): Unlimited
+```
+
+### Audit Logging
+
+**CloudTrail:**
+- All API calls logged
+- S3 bucket access logged
+- IAM changes logged
+- 90-day retention, then archive to Glacier
+
+**Application Logs:**
+- User authentication events
+- Project/tour CRUD operations
+- Job state transitions
+- Admin actions
+- Failed access attempts
+
+## Observability
+
+### CloudWatch Logs
+
+**Log Groups:**
+```
+/aws/lambda/video-validator
+/aws/ecs/cpu-workers
+/aws/batch/gpu-workers
+/aws/api/golang
+/aws/api/fastapi
+```
+
+**Structured Logging Format:**
+```json
+{
+  "timestamp": "ISO8601",
+  "level": "INFO|WARN|ERROR",
+  "service": "string",
+  "trace_id": "string",
+  "message": "string",
+  "context": {}
 }
 ```
 
-## Testing Strategy
+### CloudWatch Metrics
 
-### Dual Testing Approach
+**Custom Metrics:**
+- `JobsQueued`: Number of jobs in queue
+- `JobsProcessing`: Number of active jobs
+- `JobDuration`: Time to complete job (by stage)
+- `GPUUtilization`: GPU usage percentage
+- `TourViews`: Number of tour views
+- `APILatency`: API response time (p50, p95, p99)
+- `CacheHitRate`: Redis cache hit ratio
+- `CDNHitRate`: CloudFront cache hit ratio
 
-The testing strategy employs both unit tests and property-based tests to ensure comprehensive coverage:
+### X-Ray Tracing
 
-**Unit Tests** focus on:
-- Specific examples demonstrating correct behavior
-- Edge cases (empty point clouds, single nodes, boundary values)
-- Error conditions (invalid files, network failures, WebGL errors)
-- Integration points between components
-- UI component rendering and interaction
+**Instrumentation:**
+- All API requests traced end-to-end
+- Step Functions execution traced
+- S3 and RDS calls traced
+- Custom segments for ML operations
 
-**Property-Based Tests** focus on:
-- Universal properties that hold for all inputs
-- Comprehensive input coverage through randomization
-- Invariants that must be maintained across operations
-- Round-trip properties (serialization, parsing)
-- Constraint validation (spacing, bounds, uniqueness)
-
-### Property-Based Testing Configuration
-
-**Testing Library:** Use `fast-check` for JavaScript/TypeScript implementation
-
-**Test Configuration:**
-- Minimum 100 iterations per property test
-- Each test must reference its design document property
-- Tag format: `Feature: 3d-virtual-tour, Property {number}: {property_text}`
-
-**Example Property Test:**
-
-```typescript
-import fc from 'fast-check'
-
-describe('Auto-Navigation Engine', () => {
-  // Feature: 3d-virtual-tour, Property 1: Navigation Node Minimum Spacing
-  it('maintains minimum 1.5m spacing between all navigation nodes', () => {
-    fc.assert(
-      fc.property(
-        fc.array(fc.record({
-          x: fc.float({ min: -50, max: 50 }),
-          y: fc.float({ min: 0, max: 5 }),
-          z: fc.float({ min: -50, max: 50 })
-        }), { minLength: 100, maxLength: 1000 }),
-        (points) => {
-          const pointCloud = new PointCloudData(points)
-          const engine = new AutoNavigationEngine(pointCloud)
-          const nodes = engine.generateNavigationNodes()
-          
-          // Check all pairs of nodes
-          for (let i = 0; i < nodes.length; i++) {
-            for (let j = i + 1; j < nodes.length; j++) {
-              const distance = nodes[i].position.distanceTo(nodes[j].position)
-              expect(distance).toBeGreaterThanOrEqual(1.5)
-            }
-          }
-        }
-      ),
-      { numRuns: 100 }
-    )
-  })
-  
-  // Feature: 3d-virtual-tour, Property 2: Navigation Node Confidence Bounds
-  it('assigns confidence scores between 0.0 and 1.0', () => {
-    fc.assert(
-      fc.property(
-        arbitraryPointCloud(),
-        (pointCloud) => {
-          const engine = new AutoNavigationEngine(pointCloud)
-          const nodes = engine.generateNavigationNodes()
-          
-          nodes.forEach(node => {
-            expect(node.confidence).toBeGreaterThanOrEqual(0.0)
-            expect(node.confidence).toBeLessThanOrEqual(1.0)
-          })
-        }
-      ),
-      { numRuns: 100 }
-    )
-  })
-})
+**Trace Annotations:**
+```
+user_id, project_id, job_id, tour_id
+stage, status, error_type
 ```
 
-### Unit Test Examples
+### Alerting
 
-```typescript
-describe('Gaussian Splat Renderer', () => {
-  it('loads a valid .ply file successfully', async () => {
-    const renderer = new GaussianSplatRenderer(canvas, config)
-    const url = '/test-data/valid-pointcloud.ply'
-    
-    await expect(renderer.loadPointCloud(url)).resolves.not.toThrow()
-    expect(renderer.pointCloud.count).toBeGreaterThan(0)
-  })
-  
-  it('rejects invalid .ply file with descriptive error', async () => {
-    const renderer = new GaussianSplatRenderer(canvas, config)
-    const url = '/test-data/invalid.ply'
-    
-    await expect(renderer.loadPointCloud(url))
-      .rejects.toThrow('Invalid PLY file format')
-  })
-  
-  it('handles empty point cloud gracefully', async () => {
-    const renderer = new GaussianSplatRenderer(canvas, config)
-    const emptyCloud = new GaussianSplatData({ count: 0 })
-    
-    expect(() => renderer.render()).not.toThrow()
-  })
-})
+**Critical Alerts (PagerDuty):**
+- Job failure rate >10% in 5 minutes
+- API error rate >5% in 5 minutes
+- GPU worker unavailable for >10 minutes
+- Database connection failures
+- S3 access errors
 
-describe('Navigation Controller', () => {
-  it('blocks navigation during active transition', async () => {
-    const controller = new NavigationController(renderer, tourPath)
-    
-    const transition1 = controller.navigateToNode('node-1')
-    const transition2 = controller.navigateToNode('node-2')
-    
-    await expect(transition2).rejects.toThrow('Navigation blocked during transition')
-    await transition1
-  })
-  
-  it('exits guided mode on manual navigation', () => {
-    const controller = new NavigationController(renderer, tourPath)
-    controller.startGuidedTour()
-    
-    expect(controller.guidedModeActive).toBe(true)
-    
-    controller.handleNodeClick('node-3')
-    
-    expect(controller.guidedModeActive).toBe(false)
-  })
-})
+**Warning Alerts (Email):**
+- Job queue depth >50 for >15 minutes
+- CDN cache hit rate <80%
+- API latency p95 >500ms
+- Cost exceeds budget threshold
+
+**SLO/SLA Targets:**
+```
+Availability: 99.5% uptime
+API Latency: p95 <200ms, p99 <500ms
+Job Completion: 95% within 24 hours
+Tour Load Time: p95 <3 seconds
 ```
 
-### Integration Testing
+## Cost Optimization
 
-Integration tests verify the interaction between major components:
+### Spot Instances for GPU Workers
 
-```typescript
-describe('End-to-End Tour Creation', () => {
-  it('creates a complete tour from upload to viewing', async () => {
-    // Upload point cloud
-    const file = new File([plyData], 'test.ply')
-    const tour = await contentManager.uploadTour(file, metadata)
-    
-    expect(tour.id).toBeDefined()
-    expect(tour.navigationNodes.length).toBeGreaterThan(0)
-    
-    // Load tour in viewer
-    const renderer = new GaussianSplatRenderer(canvas, config)
-    await renderer.loadPointCloud(tour.pointCloudUrl)
-    
-    const controller = new NavigationController(renderer, tour.tourPath)
-    
-    // Navigate through tour
-    for (const nodeId of tour.tourPath.nodes) {
-      await controller.navigateToNode(nodeId)
-      expect(controller.currentNode.id).toBe(nodeId)
-    }
-  })
-})
+**Strategy:**
+- Use Spot for 70% of GPU capacity
+- On-Demand for remaining 30% (guaranteed capacity)
+- Spot interruption handling: checkpoint and resume
+- Diversify instance types (G5, P4, P5)
+
+**Cost Savings:**
+```
+On-Demand g5.4xlarge: $1.624/hour
+Spot g5.4xlarge: ~$0.487/hour (70% savings)
+Monthly savings: ~$800/instance
 ```
 
-### Performance Testing
+### Caching Strategy
 
-While not part of unit tests, performance benchmarks should be tracked:
+**ElastiCache:**
+- Cache tour manifests (reduce S3 GET requests)
+- Cache permissions (reduce RDS queries)
+- Cache signed URLs (reduce computation)
+- Target 90% cache hit rate
 
-```typescript
-describe('Performance Benchmarks', () => {
-  it('renders at target frame rate', async () => {
-    const renderer = new GaussianSplatRenderer(canvas, config)
-    await renderer.loadPointCloud(testTourUrl)
-    
-    const frameCount = 300
-    const startTime = performance.now()
-    
-    for (let i = 0; i < frameCount; i++) {
-      renderer.render()
-    }
-    
-    const endTime = performance.now()
-    const fps = frameCount / ((endTime - startTime) / 1000)
-    
-    console.log(`Average FPS: ${fps}`)
-    expect(fps).toBeGreaterThanOrEqual(30)
-  })
-})
+**CloudFront:**
+- Cache tours for 24 hours
+- Cache thumbnails for 7 days
+- Cache static assets for 30 days
+- Compress responses (gzip, brotli)
+
+### LOD and Tiling
+
+**Benefits:**
+- Reduce initial payload size by 80%
+- Load only visible tiles
+- Adapt quality to device capabilities
+- Reduce CDN egress costs
+
+**Example:**
+```
+Full quality tour: 500MB
+With LOD + tiling:
+  - Initial load: 50MB (low LOD, center tiles)
+  - Progressive load: 200MB (medium LOD, all tiles)
+  - Full quality: 500MB (high LOD, on-demand)
+
+CDN cost reduction: 60-80%
 ```
 
-### Test Data Generators
+### S3 Lifecycle Policies
 
-For property-based testing, custom generators create realistic test data:
+**Policy:**
+```
+Raw videos:
+  - 0-30 days: S3 Standard
+  - 30-90 days: S3 Infrequent Access
+  - 90+ days: Glacier
 
-```typescript
-// Arbitrary point cloud generator
-function arbitraryPointCloud(): fc.Arbitrary<PointCloudData> {
-  return fc.record({
-    points: fc.array(
-      fc.record({
-        x: fc.float({ min: -100, max: 100 }),
-        y: fc.float({ min: 0, max: 10 }),
-        z: fc.float({ min: -100, max: 100 }),
-        r: fc.integer({ min: 0, max: 255 }),
-        g: fc.integer({ min: 0, max: 255 }),
-        b: fc.integer({ min: 0, max: 255 })
-      }),
-      { minLength: 1000, maxLength: 10000 }
-    )
-  }).map(data => new PointCloudData(data.points))
-}
+Frames:
+  - 0-7 days: S3 Standard
+  - 7-30 days: S3 Infrequent Access
+  - 30+ days: Delete
 
-// Arbitrary navigation node generator
-function arbitraryNavigationNode(): fc.Arbitrary<NavigationNode> {
-  return fc.record({
-    id: fc.uuid(),
-    position: fc.record({
-      x: fc.float({ min: -50, max: 50 }),
-      y: fc.float({ min: 1.0, max: 2.5 }),
-      z: fc.float({ min: -50, max: 50 })
-    }),
-    orientation: fc.record({
-      x: fc.float({ min: -1, max: 1 }),
-      y: fc.float({ min: -1, max: 1 }),
-      z: fc.float({ min: -1, max: 1 }),
-      w: fc.float({ min: -1, max: 1 })
-    }),
-    confidence: fc.float({ min: 0.0, max: 1.0 }),
-    viewRadius: fc.float({ min: 2.0, max: 5.0 }),
-    poiType: fc.constantFrom(...Object.values(POIType))
-  })
-}
+Checkpoints:
+  - 0-7 days: S3 Standard
+  - 7+ days: Delete
+
+Tours:
+  - Indefinite: S3 Standard (frequently accessed)
 ```
 
-### Continuous Integration
+**Cost Impact:**
+```
+1TB raw videos:
+  - S3 Standard: $23.55/month
+  - Glacier: $4.10/month
+  - Savings: $19.45/month per TB
+```
 
-All tests should run automatically on:
-- Every pull request
-- Every commit to main branch
-- Nightly builds for extended property test runs (1000+ iterations)
+## Failure Modes and Recovery
 
-**CI Configuration Example:**
+### GPU Worker Failure
 
-```yaml
-name: Test Suite
+**Scenarios:**
+- Out of memory (OOM)
+- Spot instance interruption
+- Training divergence
+- Hardware failure
 
-on: [push, pull_request]
+**Recovery:**
+- Checkpoint every 1000 iterations
+- Resume from last checkpoint
+- Retry with reduced batch size (OOM)
+- Fallback to On-Demand instance (Spot interruption)
+- Alert if 3 consecutive failures
 
-jobs:
-  test:
-    runs-on: ubuntu-latest
+### Database Failure
+
+**Scenarios:**
+- Primary instance failure
+- Connection pool exhaustion
+- Slow queries
+- Disk full
+
+**Recovery:**
+- Multi-AZ deployment with automatic failover
+- Read replicas for analytics queries
+- Connection pooling with circuit breaker
+- Query timeout (5 seconds)
+- Automated backups (daily, 7-day retention)
+
+### S3 Failure
+
+**Scenarios:**
+- Access denied
+- Bucket not found
+- Network timeout
+- Rate limiting
+
+**Recovery:**
+- Retry with exponential backoff (3 attempts)
+- Cross-region replication for critical data
+- Fallback to alternative bucket
+- Alert on persistent failures
+
+### CDN Failure
+
+**Scenarios:**
+- Origin unreachable
+- Cache invalidation failure
+- Geographic routing issues
+
+**Recovery:**
+- Multiple origins (primary + backup)
+- Stale-while-revalidate caching
+- Automatic failover to backup origin
+- Monitor origin health checks
+
+### Step Functions Failure
+
+**Scenarios:**
+- State timeout
+- Lambda throttling
+- Worker unavailable
+- Invalid state transition
+
+**Recovery:**
+- Timeout per state (configurable)
+- Retry policy per state (max 3 attempts)
+- Dead letter queue for manual intervention
+- Resume from last successful state
+- Notification on terminal failure
+
+## Diagrams
+
+### Use-Case Diagram
+
+```mermaid
+flowchart TD
+    Owner[Tour Owner]
+    Visitor[Tour Visitor]
+    Admin[System Admin]
     
-    steps:
-      - uses: actions/checkout@v2
-      - uses: actions/setup-node@v2
-        with:
-          node-version: '18'
-      
-      - name: Install dependencies
-        run: npm install
-      
-      - name: Run unit tests
-        run: npm test
-      
-      - name: Run property tests
-        run: npm run test:property
-      
-      - name: Run integration tests
-        run: npm run test:integration
-      
-      - name: Upload coverage
-        uses: codecov/codecov-action@v2
+    Owner --> UC1[Upload Video]
+    Owner --> UC2[Configure Tour]
+    Owner --> UC3[Publish Tour]
+    Owner --> UC4[View Analytics]
+    Owner --> UC5[Update Tour]
+    
+    Visitor --> UC6[View Tour]
+    Visitor --> UC7[Navigate Tour]
+    Visitor --> UC8[Share Tour]
+    
+    Admin --> UC9[Monitor Jobs]
+    Admin --> UC10[Manage Users]
+    Admin --> UC11[Review Costs]
+    Admin --> UC12[Handle Failures]
+    
+    UC1 --> System[Comic-3D-Tourer System]
+    UC2 --> System
+    UC3 --> System
+    UC4 --> System
+    UC5 --> System
+    UC6 --> System
+    UC7 --> System
+    UC8 --> System
+    UC9 --> System
+    UC10 --> System
+    UC11 --> System
+    UC12 --> System
 ```
 
-## Conclusion
+### Process Flow Diagram
 
-This design provides a comprehensive architecture for a 3D virtual tour application with intelligent auto-navigation capabilities. The system leverages modern web technologies (WebGL 2.0, Gaussian Splatting) to deliver high-quality immersive experiences while maintaining performance across devices.
+```mermaid
+flowchart TD
+    Start([Owner Uploads Video]) --> Validate{Video Valid?}
+    Validate -->|No| Error1[Show Error]
+    Validate -->|Yes| Store[Store in S3]
+    
+    Store --> CreateJob[Create Job Record]
+    CreateJob --> Queue[Enqueue to Step Functions]
+    
+    Queue --> Sample[Frame Sampling]
+    Sample --> Poses[Pose Estimation]
+    Poses --> Reconstruct[Scene Reconstruction GS/NeRF]
+    Reconstruct --> Optimize[Optimization LOD/Tiling]
+    Optimize --> Package[Package Tour]
+    
+    Package --> Complete{Success?}
+    Complete -->|No| Retry{Retry Count < 3?}
+    Retry -->|Yes| Queue
+    Retry -->|No| Failed[Mark Failed]
+    
+    Complete -->|Yes| Notify[Notify Owner]
+    Notify --> Preview[Owner Previews]
+    Preview --> Publish[Owner Publishes]
+    Publish --> CDN[Deploy to CloudFront]
+    CDN --> Live[Tour Live]
+    
+    Live --> View[Visitors View Tour]
+    View --> Analytics[Track Analytics]
+    Analytics --> Dashboard[Display in Dashboard]
+```
 
-The auto-navigation engine's spatial analysis algorithms automatically identify optimal viewing positions and generate natural tour paths, significantly reducing the manual effort required to create professional virtual tours. The dual testing approach ensures both specific correctness (unit tests) and universal correctness (property-based tests), providing confidence in the system's reliability.
+### Architecture Diagram
 
-Key architectural decisions:
-- Client-heavy rendering for performance and scalability
-- Server-side spatial analysis for computational efficiency
-- Progressive loading for responsive user experience
-- Comprehensive error handling for robustness
-- Accessibility-first design for inclusivity
+```mermaid
+flowchart TD
+    subgraph Client["Client Layer"]
+        Browser[Web Browser]
+        Dashboard[Next.js Dashboard]
+        Viewer[Three.js Viewer]
+    end
+    
+    subgraph CDN["Content Delivery"]
+        CloudFront[CloudFront CDN]
+    end
+    
+    subgraph API["API Layer"]
+        ALB[Application Load Balancer]
+        Golang[Golang API]
+        FastAPI[Python FastAPI]
+        Lambda[AWS Lambda]
+    end
+    
+    subgraph Auth["Authentication"]
+        Cognito[AWS Cognito]
+    end
+    
+    subgraph Processing["Processing Layer"]
+        StepFunctions[Step Functions]
+        Batch[AWS Batch]
+        ECS[ECS Workers]
+        CPUWorker[CPU Workers]
+        GPUWorker[GPU Workers G5/P4/P5]
+    end
+    
+    subgraph Storage["Storage Layer"]
+        S3[Amazon S3]
+        RDS[(PostgreSQL RDS)]
+        Redis[(ElastiCache Redis)]
+    end
+    
+    subgraph Analytics["Analytics"]
+        Athena[Amazon Athena]
+        QuickSight[QuickSight]
+    end
+    
+    subgraph Security["Security"]
+        WAF[AWS WAF]
+        KMS[AWS KMS]
+        Secrets[Secrets Manager]
+    end
+    
+    subgraph Monitoring["Observability"]
+        CloudWatch[CloudWatch]
+        XRay[X-Ray]
+    end
+    
+    Browser --> Dashboard
+    Browser --> Viewer
+    Dashboard --> CloudFront
+    Viewer --> CloudFront
+    CloudFront --> S3
+    
+    Dashboard --> WAF
+    WAF --> ALB
+    ALB --> Golang
+    ALB --> FastAPI
+    
+    Golang --> Cognito
+    FastAPI --> Cognito
+    
+    Golang --> RDS
+    Golang --> Redis
+    FastAPI --> RDS
+    FastAPI --> Redis
+    
+    FastAPI --> StepFunctions
+    StepFunctions --> Batch
+    StepFunctions --> ECS
+    Batch --> GPUWorker
+    ECS --> CPUWorker
+    
+    CPUWorker --> S3
+    GPUWorker --> S3
+    Lambda --> S3
+    
+    S3 --> Lambda
+    Lambda --> RDS
+    
+    S3 --> Athena
+    Athena --> QuickSight
+    
+    KMS --> S3
+    KMS --> RDS
+    Secrets --> Golang
+    Secrets --> FastAPI
+    
+    Golang --> CloudWatch
+    FastAPI --> CloudWatch
+    CPUWorker --> CloudWatch
+    GPUWorker --> CloudWatch
+    
+    Golang --> XRay
+    FastAPI --> XRay
+```
+
+## Assumptions and Cost Notes
+
+### GPU Compute
+- Example instance: g3.4xlarge (122GB RAM, 16 vCPU, $1.12/hour)
+- Monthly cost (24/7 operation): 24h × 30d = $806.40/month
+- Spot instances can reduce costs by ~70%
+- Typical job uses GPU for 2-6 hours depending on video length
+- Batch scheduling optimizes utilization across multiple jobs
+
+### Caching
+- Example instance: cache.m2.2xlarge (33.8GB RAM, 4 vCPU, $0.604/hour)
+- Monthly cost (24/7 operation): 24h × 30d = $434.88/month
+- Reduces database load by 80-90%
+- Reduces S3 GET requests by 85%+
+- Critical for real-time job status updates
+
+### Storage (S3 Standard)
+- Cost: ~$0.023/GB-month
+- For 1TB (1024GB): $23.55/month
+- Average tour size: 200-500MB (optimized)
+- Raw video: 500MB-5GB (archived to Glacier after 90 days)
+- Lifecycle policies reduce long-term storage costs by 80%
+
+### Delivery (CloudFront CDN)
+- Data transfer out: ~$0.085/GB (NA/EU) or ~$0.14/GB (Asia)
+- For 1TB delivered: $87.04 (NA/EU) or $143.36 (Asia)
+- Cache hit ratio target: 85%+
+- LOD and tiling reduce egress by 60-80%
+- Compression (gzip/brotli) reduces payload by 30-40%
+
+### Cost Optimization Summary
+- Spot instances for GPU: 70% savings on compute
+- Aggressive caching: 85% reduction in origin requests
+- S3 lifecycle policies: 80% savings on long-term storage
+- LOD/tiling: 60-80% reduction in CDN egress
+- Total estimated cost per tour: $5-15 (processing) + $0.50-2/month (storage + delivery)
+
+### Scaling Assumptions
+- 1000 tours/month: ~$10,000-15,000/month infrastructure
+- 10,000 tours/month: ~$80,000-100,000/month infrastructure
+- Economies of scale improve with volume (better Spot availability, CDN discounts)
